@@ -1,6 +1,21 @@
 const API_URL = "http://universities.hipolabs.com/search";
 const DATASET_URL = "https://raw.githubusercontent.com/Hipo/university-domains-list/master/world_universities_and_domains.json";
 
+const queryAliases = {
+  mit: "Massachusetts Institute of Technology",
+  nus: "National University of Singapore",
+  ntu: "Nanyang Technological University",
+  ucl: "University College London",
+  eth: "ETH Zurich",
+  caltech: "California Institute of Technology",
+  berkeley: "University of California, Berkeley",
+};
+
+function expandQuery(value) {
+  const normalized = value.trim().toLowerCase();
+  return queryAliases[normalized] || value.trim();
+}
+
 function normalize(item) {
   return {
     name: item.name,
@@ -42,7 +57,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const query = String(req.query.q || "").trim();
+  const rawQuery = String(req.query.q || "").trim();
+  const query = expandQuery(rawQuery);
   const country = String(req.query.country || "").trim();
 
   if (!query && !country) {
@@ -62,7 +78,7 @@ export default async function handler(req, res) {
 
     const results = data.slice(0, 80).map(normalize);
     res.setHeader("Cache-Control", "s-maxage=1800, stale-while-revalidate=86400");
-    return res.status(200).json({ results, source: "hipo-api" });
+    return res.status(200).json({ results, source: "hipo-api", resolvedQuery: query });
   } catch (primaryError) {
     try {
       const response = await fetchWithTimeout(DATASET_URL, 10000);
@@ -71,7 +87,7 @@ export default async function handler(req, res) {
       const data = await response.json();
       const results = data.filter((item) => matches(item, query, country)).slice(0, 80).map(normalize);
       res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
-      return res.status(200).json({ results, source: "hipo-dataset-fallback" });
+      return res.status(200).json({ results, source: "hipo-dataset-fallback", resolvedQuery: query });
     } catch (fallbackError) {
       return res.status(502).json({
         error: "University directory is temporarily unavailable.",
