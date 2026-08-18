@@ -1,237 +1,376 @@
-import axios from "axios";
-import React, { useState, useEffect } from "react";
-import InfiniteScroll from "react-infinite-scroll-component";
+import Head from "next/head";
+import { useEffect, useMemo, useState } from "react";
+import { qs2027, qsSource } from "../lib/qs2027";
 
-import Icon from "@mdi/react";
-import { mdiWeb, mdiStar } from "@mdi/js";
-import { Wrapper } from "../components/Wrapper/Wrapper";
-import Header from "../components/header";
+const countries = [
+  "United States",
+  "United Kingdom",
+  "Australia",
+  "Canada",
+  "China",
+  "Germany",
+  "Hong Kong",
+  "India",
+  "Japan",
+  "Malaysia",
+  "Netherlands",
+  "Singapore",
+  "South Korea",
+  "Switzerland",
+  "Thailand",
+];
 
-import { useRouter } from "next/router";
+const quickSearches = ["MIT", "Oxford", "NUS", "University of Tokyo", "Chulalongkorn"];
+
+function cleanName(value = "") {
+  return value
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, "")
+    .replace(/\bthe\b/g, "")
+    .replace(/university college london/g, "ucl")
+    .replace(/nanyang technological university singapore/g, "nanyang technological university")
+    .replace(/national university of singapore/g, "nus")
+    .replace(/california institute of technology/g, "caltech")
+    .replace(/massachusetts institute of technology/g, "mit")
+    .replace(/university of california berkeley/g, "uc berkeley")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function rankFor(name) {
+  const candidate = cleanName(name);
+  return qs2027.find((item) => {
+    const ranked = cleanName(item.name);
+    return candidate === ranked || candidate.includes(ranked) || ranked.includes(candidate);
+  });
+}
+
+function universityKey(item) {
+  return `${item.name}|${item.country}`;
+}
+
+function safeLink(value) {
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) return value;
+  return `https://${value}`;
+}
 
 export default function Home() {
-  const router = useRouter();
-
-  const [favourite, setfavourite] = useState([]);
-
-  const [hasMore, sethasMore] = useState(true);
-  const [universities, setuniversities] = useState([]);
-  const [n, setn] = useState(40);
-  const [sort, setsort] = useState(["asc", "name"]);
-  const [university, setUniversity] = useState("");
+  const [query, setQuery] = useState("");
   const [country, setCountry] = useState("");
-
-  const [email, setemail] = useState("");
-
-  const [sidebar, setsidebar] = useState(false);
-  function togglesidebar() {
-    setsidebar(!sidebar);
-    document.body.classList.toggle("overflow-y-hidden");
-  }
-
-  const fetchData = async () => {
-    let url =
-      "http://universities.hipolabs.com/search?name=" +
-      university +
-      "&country=" +
-      country;
-    var tempData = await axios
-      .get(url)
-      .then(function (response) {
-        return Sorting(response.data);
-      })
-      .catch(function (error) {
-        console.log(error);
-      });
-    axios
-      .get("./api/session")
-      .then((response) => {
-        if (response.data.session) {
-          setemail(response.data.session.email);
-        } else {
-          setemail("");
-        }
-      })
-      .catch(function (error) {
-        console.log(error);
-      });
-
-    await axios
-      .post("./api/favourite")
-      .then((response) => {
-        setfavourite(response.data.favourite);
-      })
-      .catch(function (error) {
-        console.log(error);
-      });
-    // setdata(tempData);
-    if (tempData?.length > n) {
-      sethasMore(true);
-      setuniversities(tempData.slice(0, n));
-    } else {
-      sethasMore(false);
-      setuniversities(tempData);
-    }
-  };
-
-  const loadMore = async () => {
-    setn(n + 5);
-  };
-
-  function Sorting(array) {
-    let temp = array?.sort(function (a, b) {
-      return b[sort[1]] > a[sort[1]] ? 1 : b[sort[1]] < a[sort[1]] ? -1 : 0;
-    });
-    if (sort[0] == "desc") temp.reverse();
-    return temp;
-  }
-  
-  function handleChange(event) {
-    if (event.target.value !== undefined && event.target.value !== null) {
-      const regex = /([^:\s]+):([^:\s]+)/g;
-      let m = regex.exec(event.target.value);
-      if (m != null) {
-        setsort([m[1], m[2]]);
-      }
-    }
-  }
-
-  async function setFavourite(value) {
-    axios
-      .get("./api/session")
-      .then((response) => {
-        if (response.data.session) {
-          axios
-            .post("./api/favourite", {
-              value
-            })
-            .then((response) => {
-              setfavourite(response.data.favourite);
-            })
-            .catch(function (error) {
-              console.log(error);
-            });
-        } else {
-          router.push("/login");
-        }
-      })
-      .catch(function (error) {
-        console.log(error);
-      });
-  }
+  const [results, setResults] = useState([]);
+  const [searched, setSearched] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [source, setSource] = useState("");
+  const [shortlist, setShortlist] = useState([]);
 
   useEffect(() => {
-    fetchData();
-  }, [sort, university, country, n]);
+    try {
+      const saved = JSON.parse(localStorage.getItem("uniscope-shortlist") || "[]");
+      if (Array.isArray(saved)) setShortlist(saved.slice(0, 4));
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("uniscope-shortlist", JSON.stringify(shortlist));
+  }, [shortlist]);
+
+  const shortlistKeys = useMemo(() => new Set(shortlist.map(universityKey)), [shortlist]);
+
+  async function runSearch(event, overrideQuery) {
+    if (event) event.preventDefault();
+    const q = typeof overrideQuery === "string" ? overrideQuery : query;
+    if (!q.trim() && !country) {
+      setError("Enter a university name or choose a country.");
+      return;
+    }
+
+    if (typeof overrideQuery === "string") setQuery(overrideQuery);
+    setLoading(true);
+    setError("");
+    setSearched(true);
+
+    try {
+      const params = new URLSearchParams();
+      if (q.trim()) params.set("q", q.trim());
+      if (country) params.set("country", country);
+
+      const response = await fetch(`/api/universities?${params.toString()}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Search failed");
+
+      setResults(data.results || []);
+      setSource(data.source || "");
+    } catch (searchError) {
+      setResults([]);
+      setError(searchError.message || "Search failed. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function toggleShortlist(item) {
+    const key = universityKey(item);
+    if (shortlistKeys.has(key)) {
+      setShortlist((current) => current.filter((entry) => universityKey(entry) !== key));
+      return;
+    }
+
+    if (shortlist.length >= 4) {
+      setError("You can compare up to four universities at once.");
+      return;
+    }
+
+    setError("");
+    setShortlist((current) => [...current, item]);
+  }
 
   return (
-    <Wrapper>
-      <Header email={email} sidebar={sidebar} togglesidebar={togglesidebar} />
-      <main className="w-full flex">
-        <div className="w-full bg-slate-900  px-2 py-14">
-          <div className="px-12 w-full my-5 flex flex-wrap md:justify-between">
-            <div className="">
-              <input
-                className="shadow appearance-none border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline mx-1 w-full md:w-auto"
-                placeholder="University Name"
-                value={university}
-                onChange={(e) => setUniversity(e.target.value)}
-              />
-              <input
-                className="shadow appearance-none border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline mx-1 w-full md:w-auto"
-                placeholder="Country"
-                value={country}
-                onChange={(e) => setCountry(e.target.value)}
-              />
-            </div>
-            <select
-              onChange={handleChange}
-              className="shadow appearance-none border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline mx-1 w-auto"
-            >
-              <option value="asc:name">Name ▲</option>
-              <option value="desc:name">Name ▼</option>
-              <option value="asc:country">Country ▲</option>
-              <option value="desc:country">Country ▼</option>
-            </select>
-          </div>
-          <InfiniteScroll
-            className="flex w-full flex-wrap px-10 min-h-screen"
-            dataLength={universities?.length}
-            next={loadMore}
-            hasMore={true}
-            loader={
-              <div className="w-full flex justify-center">
-                <h4 className="text-white">Loading...</h4>
+    <>
+      <Head>
+        <title>UniScope — University Explorer</title>
+        <meta
+          name="description"
+          content="Search universities worldwide, compare a shortlist, and reference the latest QS top positions."
+        />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+      </Head>
+
+      <div className="site-shell">
+        <header className="topbar">
+          <a className="brand" href="#top" aria-label="UniScope home">
+            <span className="brand-mark">U</span>
+            <span>UniScope</span>
+          </a>
+          <nav>
+            <a href="#rankings">QS 2027</a>
+            <a href="#directory">Directory</a>
+            <a href="#compare">Compare</a>
+          </nav>
+        </header>
+
+        <main id="top">
+          <section className="hero">
+            <div className="hero-copy">
+              <div className="eyebrow"><span /> 2027 rankings + live university directory</div>
+              <h1>Find universities with context, not just a number.</h1>
+              <p>
+                Search institutions around the world, open their official sites, build a shortlist,
+                and use the latest QS top positions as a reference point.
+              </p>
+
+              <form className="search-box" onSubmit={runSearch}>
+                <label className="search-field">
+                  <span>University</span>
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="Search by university name"
+                    aria-label="University name"
+                  />
+                </label>
+                <label className="country-field">
+                  <span>Country</span>
+                  <select value={country} onChange={(event) => setCountry(event.target.value)}>
+                    <option value="">Any country</option>
+                    {countries.map((item) => <option key={item}>{item}</option>)}
+                  </select>
+                </label>
+                <button className="search-button" type="submit" disabled={loading}>
+                  {loading ? "Searching…" : "Search"}
+                </button>
+              </form>
+
+              <div className="quick-searches" aria-label="Quick searches">
+                <span>Try</span>
+                {quickSearches.map((item) => (
+                  <button key={item} onClick={() => runSearch(null, item)} type="button">{item}</button>
+                ))}
               </div>
-            }
-          >
-            {universities?.length > 0 ? (
-              universities?.map(function (university, i) {
-                return (
-                  <div
-                    key={"university_" + i}
-                    className="w-1/2 lg:w-1/4 p-2 xl:w-1/6 "
-                  >
-                    <div className="w-full h-full rounded-md hover:shadow border active:shadow-lg p-2 bg-white relative">
-                      <div className="w-full flex flex-wrap h-full">
-                        <div className="w-full flex flex-wrap">
-                          <h6 className="font-thin w-full text-xs">
-                            {university.country}
-                          </h6>
-                          <h2 className="text-sm md:text-lg text-slate-700 font-semibold w-full">
-                            {university.name}
-                          </h2>
-                        </div>
-                        <div className="w-full flex flex-wrap items-center self-end">
-                          {university.web_pages?.map(function (web_pages, y) {
-                            return (
-                              <a
-                                key={university.country + "_" + y}
-                                href={web_pages}
-                                target="_blank"
-                              >
-                                <Icon
-                                  className={
-                                    "w-6 h-6 mr-1 text-blue-400 hover:text-blue-600"
-                                  }
-                                  path={mdiWeb}
-                                />
-                              </a>
-                            );
-                          })}
-                        </div>
-                      </div>
-                      <div
-                        className="absolute right-0 top-0 w-6 h-6"
-                        onClick={() => setFavourite(university)}
-                      >
-                        {favourite?.filter((e) => e.name === university.name)
-                          .length > 0 ? (
-                          <Icon
-                            className={
-                              "w-6 h-6 mr-1 text-yellow-400 hover:text-yellow-600"
-                            }
-                            path={mdiStar}
-                          />
-                        ) : (
-                          <Icon
-                            className={
-                              "w-6 h-6 mr-1 text-gray-500 hover:text-gray-400"
-                            }
-                            path={mdiStar}
-                          />
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })
-            ) : (
-              <div></div>
+            </div>
+
+            <aside className="hero-panel">
+              <div className="hero-panel-label">QS World University Rankings 2027</div>
+              <div className="hero-rank">01</div>
+              <h2>Massachusetts Institute of Technology</h2>
+              <p>MIT retains the global #1 position in the latest QS release.</p>
+              <div className="hero-panel-footer">
+                <span>1,504 institutions ranked</span>
+                <a href={qsSource} target="_blank" rel="noreferrer">QS source ↗</a>
+              </div>
+            </aside>
+          </section>
+
+          <section className="metric-strip" aria-label="Dataset summary">
+            <div><strong>1,504</strong><span>QS 2027 institutions</span></div>
+            <div><strong>20</strong><span>top ranking positions</span></div>
+            <div><strong>Live</strong><span>global directory search</span></div>
+            <div><strong>4</strong><span>universities per shortlist</span></div>
+          </section>
+
+          <section className="section rankings" id="rankings">
+            <div className="section-heading">
+              <div>
+                <p className="section-kicker">Global benchmark</p>
+                <h2>QS 2027 — top 20 positions</h2>
+              </div>
+              <p>
+                A reference list sourced from QS. Ties mean 21 universities occupy the first 20 ranking positions.
+              </p>
+            </div>
+
+            <div className="ranking-table" role="table" aria-label="QS 2027 top universities">
+              <div className="ranking-row ranking-head" role="row">
+                <span>Rank</span><span>Institution</span><span>Location</span><span>Move</span>
+              </div>
+              {qs2027.map((item, index) => (
+                <div className="ranking-row" role="row" key={`${item.rank}-${item.name}`}>
+                  <span className="rank-number">{String(item.rank).padStart(2, "0")}</span>
+                  <span className="rank-name">{item.name}</span>
+                  <span className="rank-country">{item.country}</span>
+                  <span className={`rank-move ${String(item.change).startsWith("+") ? "up" : String(item.change).startsWith("-") ? "down" : ""}`}>
+                    {item.change}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <p className="source-note">
+              QS ranking names and positions are shown for reference. QS and its marks belong to their respective owner.
+              <a href={qsSource} target="_blank" rel="noreferrer"> View the official 2027 release ↗</a>
+            </p>
+          </section>
+
+          <section className="section directory" id="directory">
+            <div className="section-heading">
+              <div>
+                <p className="section-kicker">Explore institutions</p>
+                <h2>Global university directory</h2>
+              </div>
+              <p>
+                Search uses the Hipo Universities dataset/API for institution names, countries, domains and official web pages.
+              </p>
+            </div>
+
+            {!searched && (
+              <div className="empty-state">
+                <span>⌕</span>
+                <h3>Search from the top of the page</h3>
+                <p>Try a university name, an email domain, or select a country.</p>
+              </div>
             )}
-          </InfiniteScroll>
-        </div>
-      </main>
-    </Wrapper>
+
+            {error && <div className="error-banner">{error}</div>}
+
+            {searched && !loading && !error && (
+              <div className="result-meta">
+                <strong>{results.length}</strong> results
+                {source && <span> · {source === "hipo-api" ? "live API" : "dataset fallback"}</span>}
+              </div>
+            )}
+
+            {loading && (
+              <div className="loading-grid" aria-label="Loading universities">
+                {Array.from({ length: 6 }).map((_, index) => <div className="skeleton" key={index} />)}
+              </div>
+            )}
+
+            {!loading && results.length > 0 && (
+              <div className="university-grid">
+                {results.map((item) => {
+                  const ranking = rankFor(item.name);
+                  const selected = shortlistKeys.has(universityKey(item));
+                  const webPage = safeLink(item.webPages?.[0]);
+                  return (
+                    <article className="university-card" key={universityKey(item)}>
+                      <div className="card-topline">
+                        <span className="country-code">{item.countryCode || "UNI"}</span>
+                        {ranking && <span className="qs-badge">QS #{ranking.rank}</span>}
+                      </div>
+                      <h3>{item.name}</h3>
+                      <p className="university-location">
+                        {[item.region, item.country].filter(Boolean).join(", ")}
+                      </p>
+                      <div className="domain-list">
+                        {(item.domains || []).slice(0, 2).map((domain) => <span key={domain}>{domain}</span>)}
+                      </div>
+                      <div className="card-actions">
+                        {webPage ? <a href={webPage} target="_blank" rel="noreferrer">Official site ↗</a> : <span>No site listed</span>}
+                        <button type="button" className={selected ? "selected" : ""} onClick={() => toggleShortlist(item)}>
+                          {selected ? "Added ✓" : "+ Compare"}
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+
+            {searched && !loading && !error && results.length === 0 && (
+              <div className="empty-state compact">
+                <h3>No matching institutions</h3>
+                <p>Try a shorter university name or remove the country filter.</p>
+              </div>
+            )}
+          </section>
+
+          <section className="section compare" id="compare">
+            <div className="section-heading">
+              <div>
+                <p className="section-kicker">Shortlist</p>
+                <h2>Compare your picks</h2>
+              </div>
+              <p>Your shortlist stays in this browser. Add up to four institutions from the directory.</p>
+            </div>
+
+            {shortlist.length === 0 ? (
+              <div className="empty-state compact">
+                <h3>No universities selected yet</h3>
+                <p>Use “+ Compare” on any search result to build a shortlist.</p>
+              </div>
+            ) : (
+              <div className="compare-grid">
+                {shortlist.map((item) => {
+                  const ranking = rankFor(item.name);
+                  return (
+                    <article key={universityKey(item)}>
+                      <button className="remove" onClick={() => toggleShortlist(item)} aria-label={`Remove ${item.name}`}>×</button>
+                      <span className="compare-label">{ranking ? `QS 2027 #${ranking.rank}` : "Directory institution"}</span>
+                      <h3>{item.name}</h3>
+                      <dl>
+                        <div><dt>Country</dt><dd>{item.country}</dd></div>
+                        <div><dt>Region</dt><dd>{item.region || "—"}</dd></div>
+                        <div><dt>Domain</dt><dd>{item.domains?.[0] || "—"}</dd></div>
+                      </dl>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="methodology">
+            <div>
+              <p className="section-kicker">Data notes</p>
+              <h2>What this app does — and doesn’t — rank.</h2>
+            </div>
+            <div className="methodology-copy">
+              <p>
+                UniScope does not calculate a fake global score. QS positions are displayed only where we have an official QS 2027 reference position. Other institutions are directory entries, not implied to be unranked or lower quality.
+              </p>
+              <p>
+                University names, countries, domains and web pages come from Hipo’s open University Domains and Names dataset. Always verify admissions, tuition, programs and entry requirements on the institution’s official website.
+              </p>
+            </div>
+          </section>
+        </main>
+
+        <footer>
+          <span>UniScope · built by Thi Ha Zaw</span>
+          <div><a href="https://github.com/zerozet22k" target="_blank" rel="noreferrer">GitHub ↗</a><a href="mailto:zerozet22k@gmail.com">zerozet22k@gmail.com</a></div>
+        </footer>
+      </div>
+    </>
   );
 }
