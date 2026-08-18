@@ -1,7 +1,5 @@
 # UniScope — University Explorer
 
-A rebuilt version of the original `university-list-app`, now focused on useful public university discovery instead of the old account/database demo.
-
 ## What It Does
 
 - searches universities worldwide by name or country
